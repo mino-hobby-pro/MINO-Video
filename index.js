@@ -1,14 +1,13 @@
 // index.js (ES module)
-// Full-featured stream player with an ultra-dense, bottom-up terminal loader.
-// Replace data-src on #player with your stream URL (mp4 or .m3u8).
-// This file contains the complete player logic and a revamped showTerminalScan
-// that emits a huge volume of command-like lines appearing from the bottom at very high speed.
+// Robust, bug-hardened stream player with ultra-fast bottom-up terminal loader.
+// - Put your stream URL into data-src on the #player element (mp4 or .m3u8).
+// - This file is self-contained and written defensively to avoid race conditions and double-trigger bugs.
 
 const container = document.getElementById('player');
 if (!container) throw new Error('player container not found');
 
 const rawUrl = (container.dataset.src || '').trim();
-container.innerHTML = ''; // clear
+container.innerHTML = ''; // clear any placeholder
 
 /* ---------- DOM (player chrome) ---------- */
 const video = document.createElement('video');
@@ -91,7 +90,7 @@ terminalOverlay.innerHTML = `
 `;
 terminalOverlay.style.display = 'none';
 
-/* assemble */
+/* assemble into container */
 container.appendChild(video);
 container.appendChild(center);
 container.appendChild(controls);
@@ -110,7 +109,7 @@ const terminalLines = terminalOverlay.querySelector('.terminal-lines');
 const terminalStatusLeft = terminalOverlay.querySelector('.terminal-status .left');
 const terminalStatusRight = terminalOverlay.querySelector('.terminal-status .right');
 
-/* utilities */
+/* small helpers */
 function fmt(s){
   if (!s || isNaN(s)) return '00:00';
   const m = Math.floor(s/60), sec = Math.floor(s%60);
@@ -141,33 +140,22 @@ function showMessage(text, diagnostics){
 }
 function hideMessage(){ message.style.display = 'none'; }
 
-/* ---------- Ultra-fast bottom-up terminal scan implementation ---------- */
+/* ---------- showTerminalScan: returns a Promise and a cancel function ---------- */
 /*
-  showTerminalScan(options)
-  - durationMs: total duration of the scan
-  - density: 1..5 (higher = more lines per frame)
-  - onProgress(percent)
-  - onComplete()
-  Behavior:
-  - Emits a very large number of lines per animation frame.
-  - New lines are appended at the bottom and the container auto-scrolls upward,
-    creating the impression of a flood of output coming from the bottom.
+  options:
+    durationMs: total duration
+    density: 1..5 (higher = more lines per frame)
+    onProgress(percent)
+  returns:
+    { promise, cancel } where promise resolves when scan completes (or rejects on cancel)
 */
-function showTerminalScan({
-  durationMs = 1000,
-  density = 5,
-  onProgress = null,
-  onComplete = null
-} = {}) {
-  // clamp density
+function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = null } = {}) {
   const D = Math.max(1, Math.min(5, Math.floor(density)));
-  // scale counts aggressively for "super-fast" effect
-  const basePerFrame = 8 * D;       // baseline lines per RAF tick
-  const burstMax = 40 * D;         // occasional bursts
+  const basePerFrame = 8 * D;
+  const burstMax = 40 * D;
   const start = performance.now();
   const end = start + durationMs;
 
-  // realistic fragments
   const verbs = ['mkdir','touch','ln','cp','mv','curl','openssl','ffprobe','ffmpeg','segmenter','hash','verify','stat','chmod','chown','rsync','wget','cat','sed','awk','split','tar','gzip'];
   const dirs = ['/var/cache/cdn','/tmp/segments','/srv/media','/mnt/storage','/opt/streamer','/run/session','/data/streams','/var/lib/hls','/usr/local/bin'];
   const files = ['segment-0001.ts','segment-0002.ts','index.m3u8','manifest.json','chunk-12.bin','init.mp4','audio-001.aac','meta.json','thumb.jpg'];
@@ -181,13 +169,12 @@ function showTerminalScan({
   terminalStatusRight.textContent = '0%';
 
   let raf = null;
-  let totalPrinted = 0;
+  let cancelled = false;
 
   function nowTimestamp() {
     const d = new Date();
     return d.toISOString().replace('T',' ').split('.')[0];
   }
-
   function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
   function genLine(t) {
@@ -226,37 +213,34 @@ function showTerminalScan({
     }
   }
 
-  // Append line at bottom and keep scroll anchored to bottom so new lines appear from bottom upward visually.
   function appendLineBottom(text, cls = 'terminal-line ok') {
     const el = document.createElement('div');
     el.className = cls;
     el.textContent = text;
     terminalLines.appendChild(el);
-    // reveal micro-animation
     requestAnimationFrame(() => {
       el.style.opacity = '1';
       el.style.transform = 'translateY(0)';
-      // keep scroll pinned to bottom so new lines appear from bottom
       terminalLines.scrollTop = terminalLines.scrollHeight;
     });
-    totalPrinted++;
-    // trim to keep DOM manageable
-    const maxLines = 1200; // allow many lines for intense effect
+    // trim
+    const maxLines = 1200;
     if (terminalLines.children.length > maxLines) {
-      // remove oldest 120 lines
       for (let i = 0; i < 120; i++) {
         if (terminalLines.firstChild) terminalLines.removeChild(terminalLines.firstChild);
       }
     }
   }
 
-  function tick(now) {
+  function tick(now, resolve) {
+    if (cancelled) {
+      terminalOverlay.style.display = 'none';
+      return resolve(new Error('cancelled'));
+    }
     const t = Math.min(1, (now - start) / durationMs);
     const pct = Math.floor(t * 100);
     terminalStatusRight.textContent = `${pct}%`;
 
-    // compute how many lines to emit this frame
-    // base + random jitter + occasional burst
     const jitter = randomInt(0, 6 * D);
     const burst = (Math.random() < 0.12) ? randomInt(8 * D, burstMax) : 0;
     const count = basePerFrame + jitter + burst;
@@ -267,7 +251,6 @@ function showTerminalScan({
       appendLineBottom(line.text, cls);
     }
 
-    // occasionally print a progress bar line for realism
     if (Math.random() < 0.12 * D) {
       const barPct = Math.min(100, Math.floor(pct + randomInt(-6, 6)));
       const filled = Math.floor(barPct / 4);
@@ -275,13 +258,11 @@ function showTerminalScan({
       appendLineBottom(`${nowTimestamp()}  ${bar}`, 'terminal-line ok');
     }
 
-    // update progress callback
     if (onProgress) onProgress(pct);
 
     if (now < end) {
-      raf = requestAnimationFrame(tick);
+      raf = requestAnimationFrame(n => tick(n, resolve));
     } else {
-      // finalize
       appendLineBottom(`${nowTimestamp()}  verifying segments... OK`, 'terminal-line ok');
       appendLineBottom(`${nowTimestamp()}  applying adaptive-bitrate policy... OK`, 'terminal-line ok');
       appendLineBottom(`${nowTimestamp()}  finalizing manifest... OK`, 'terminal-line ok');
@@ -290,19 +271,27 @@ function showTerminalScan({
       if (onProgress) onProgress(100);
       setTimeout(() => {
         terminalOverlay.style.display = 'none';
-        if (onComplete) onComplete();
+        resolve();
       }, 220);
     }
   }
 
-  // start
-  raf = requestAnimationFrame(tick);
+  // return promise + cancel
+  let resolveOuter, rejectOuter;
+  const promise = new Promise((resolve, reject) => {
+    resolveOuter = resolve;
+    rejectOuter = reject;
+    raf = requestAnimationFrame(n => tick(n, resolve));
+  });
 
-  // return cancel function
-  return () => {
+  const cancel = () => {
+    cancelled = true;
     if (raf) cancelAnimationFrame(raf);
     terminalOverlay.style.display = 'none';
+    rejectOuter(new Error('cancelled'));
   };
+
+  return { promise, cancel };
 }
 
 /* ---------- HLS / attach ---------- */
@@ -312,71 +301,72 @@ async function attachSource(url) {
   const isHls = /\.m3u8($|\?)/i.test(url);
   const canPlayHlsNatively = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
-  // show ultra-fast terminal scan then attach
-  showTerminalScan({
-    durationMs: 900,   // short, intense burst
-    density: 5,        // maximum density
-    onProgress: (p) => { /* optional hook */ },
-    onComplete: async () => {
-      if (isHls && !canPlayHlsNatively) {
-        try {
-          showMessage('Loading HLS engine…');
-          const { default: Hls } = await import('https://cdn.jsdelivr.net/npm/hls.js@1.5.0/dist/hls.min.js');
-          if (Hls.isSupported()) {
-            hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: true, capLevelToPlayerSize: true });
-            hlsInstance.loadSource(url);
-            hlsInstance.attachMedia(video);
-            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-              hideMessage();
-              populateQualityOptions();
-            });
-            hlsInstance.on(Hls.Events.ERROR, (event, data) => {
-              console.warn('hls error', event, data);
-              if (data.fatal) showMessage('Playback error (HLS).', `HLS error: ${data.type} ${data.details}`);
-            });
-            return;
-          } else {
-            showMessage('HLS not supported');
-            return;
-          }
-        } catch (err) {
-          console.warn('Failed to load hls.js', err);
-          showMessage('HLS engine failed', String(err));
-          return;
-        }
-      }
+  // show scan and wait for it to complete before attaching
+  const { promise: scanPromise } = showTerminalScanPromise({ durationMs: 900, density: 5, onProgress: null });
+  try {
+    await scanPromise;
+  } catch (err) {
+    // if scan was cancelled or failed, continue to attempt attach but show message
+    console.warn('scan aborted or failed', err);
+  }
 
-      // MP4 or native HLS: assign via <source>
-      try {
-        showMessage('Loading…');
-        while (video.firstChild) video.removeChild(video.firstChild);
-        const source = document.createElement('source');
-        source.src = url;
-        video.appendChild(source);
-        video.load();
-        await waitForEvent(video, 'loadedmetadata', 9000);
-        hideMessage();
-        try { await video.play(); } catch {}
+  if (isHls && !canPlayHlsNatively) {
+    try {
+      showMessage('Loading HLS engine…');
+      const { default: Hls } = await import('https://cdn.jsdelivr.net/npm/hls.js@1.5.0/dist/hls.min.js');
+      if (Hls.isSupported()) {
+        hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: true, capLevelToPlayerSize: true });
+        hlsInstance.loadSource(url);
+        hlsInstance.attachMedia(video);
+        hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+          hideMessage();
+          populateQualityOptions();
+        });
+        hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+          console.warn('hls error', event, data);
+          if (data.fatal) showMessage('Playback error (HLS).', `HLS error: ${data.type} ${data.details}`);
+        });
         return;
-      } catch (err) {
-        console.warn('Direct assignment failed', err);
-        const code = video.error?.code ?? 'none';
-        const ns = video.networkState ?? 'unknown';
-        const resolved = video.currentSrc || rawUrl;
-        const diag = [
-          `MediaError code: ${code}`,
-          `networkState: ${ns}`,
-          `currentSrc: ${resolved}`,
-          `Signed URLs may expire or be restricted by IP/referrer.`,
-          `Open the URL in a new tab to confirm it plays directly.`
-        ].join('\n');
-        showMessage('Unable to play stream. Check URL or server restrictions.', diag);
+      } else {
+        showMessage('HLS not supported');
+        return;
       }
+    } catch (err) {
+      console.warn('Failed to load hls.js', err);
+      showMessage('HLS engine failed', String(err));
+      return;
     }
-  });
+  }
+
+  // MP4 or native HLS: assign via <source>
+  try {
+    showMessage('Loading…');
+    while (video.firstChild) video.removeChild(video.firstChild);
+    const source = document.createElement('source');
+    source.src = url;
+    video.appendChild(source);
+    video.load();
+    await waitForEvent(video, 'loadedmetadata', 9000);
+    hideMessage();
+    try { await video.play(); } catch {}
+    return;
+  } catch (err) {
+    console.warn('Direct assignment failed', err);
+    const code = video.error?.code ?? 'none';
+    const ns = video.networkState ?? 'unknown';
+    const resolved = video.currentSrc || rawUrl;
+    const diag = [
+      `MediaError code: ${code}`,
+      `networkState: ${ns}`,
+      `currentSrc: ${resolved}`,
+      `Signed URLs may expire or be restricted by IP/referrer.`,
+      `Open the URL in a new tab to confirm it plays directly.`
+    ].join('\n');
+    showMessage('Unable to play stream. Check URL or server restrictions.', diag);
+  }
 }
 
-/* helper */
+/* helper to await event */
 function waitForEvent(el, eventName, timeout = 5000) {
   return new Promise((resolve, reject) => {
     let done = false;
@@ -436,7 +426,7 @@ progress.addEventListener('click', (e) => {
 });
 progress.addEventListener('pointerdown', (e) => {
   seeking = true;
-  progress.setPointerCapture(e.pointerId);
+  try { progress.setPointerCapture(e.pointerId); } catch {}
 });
 progress.addEventListener('pointermove', (e) => {
   if (!seeking) return;
@@ -611,16 +601,36 @@ video.addEventListener('error', (ev) => {
   showMessage('Unable to play stream. Server or CORS restrictions may apply.', diag);
 });
 
-/* ---------- Download button behavior ---------- */
-downloadBtn.addEventListener('click', (e) => {
+/* ---------- Download button behavior (defensive) ---------- */
+let downloadInProgress = false;
+downloadBtn.addEventListener('click', async (e) => {
   e.preventDefault();
-  showTerminalScan({
-    durationMs: 1200,
-    density: 5,
-    onComplete: () => {
-      try { window.open(rawUrl, '_blank', 'noopener'); } catch (err) { window.location.href = rawUrl; }
+  if (downloadInProgress) return;
+  downloadInProgress = true;
+  downloadBtn.disabled = true;
+  downloadBtn.style.opacity = '0.6';
+
+  // show scan and wait
+  const { promise: scanPromise, cancel } = showTerminalScanPromise({ durationMs: 1200, density: 5, onProgress: null });
+  try {
+    await scanPromise;
+    // open URL in new tab safely
+    try {
+      window.open(rawUrl, '_blank', 'noopener');
+    } catch (err) {
+      // fallback to same tab
+      window.location.href = rawUrl;
     }
-  });
+  } catch (err) {
+    // scan was cancelled or failed; show a brief message
+    console.warn('Download scan aborted or failed', err);
+    showMessage('Download cancelled or failed');
+    setTimeout(hideMessage, 1200);
+  } finally {
+    downloadInProgress = false;
+    downloadBtn.disabled = false;
+    downloadBtn.style.opacity = '';
+  }
 });
 
 /* init UI */
@@ -629,7 +639,7 @@ setMuteIcon(false, video.volume);
 volBar.style.width = (video.volume * 100) + '%';
 speedSelect.value = 1;
 
-/* start */
+/* start attach */
 attachSource(rawUrl);
 
 /* cleanup on unload */
