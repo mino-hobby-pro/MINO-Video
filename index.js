@@ -1,6 +1,8 @@
 // index.js (ES module)
-// Terminal-style scan + full-featured player.
-// Usage: set data-src on #player to your stream URL (mp4 or .m3u8).
+// Full-featured stream player with an intense, realistic terminal-style loader.
+// - Replace data-src on #player with your stream URL (mp4 or .m3u8).
+// - The terminal loader prints massive, command-line-like output (mkdir, hashing, transfers, % progress, ETA).
+// - Uses hls.js dynamically for .m3u8 when needed. Playback uses native <video> where possible.
 
 const container = document.getElementById('player');
 if (!container) throw new Error('player container not found');
@@ -8,7 +10,7 @@ if (!container) throw new Error('player container not found');
 const rawUrl = (container.dataset.src || '').trim();
 container.innerHTML = ''; // clear
 
-/* ---------- DOM ---------- */
+/* ---------- DOM (player chrome) ---------- */
 const video = document.createElement('video');
 video.playsInline = true;
 video.preload = 'metadata';
@@ -78,7 +80,7 @@ pipBadge.style.display = 'none';
 const message = document.createElement('div'); message.className = 'message'; message.style.display = 'none';
 message.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style="opacity:.95"><path d="M11 15h2v2h-2zM11 7h2v6h-2z"/></svg><div><div class="msg-text">Loading…</div><div class="diagnostics" style="display:none"></div></div>`;
 
-/* terminal overlay */
+/* terminal overlay (intense output) */
 const terminalOverlay = document.createElement('div');
 terminalOverlay.className = 'terminal-overlay';
 terminalOverlay.innerHTML = `
@@ -139,38 +141,33 @@ function showMessage(text, diagnostics){
 }
 function hideMessage(){ message.style.display = 'none'; }
 
-/* ---------- Terminal scan implementation ---------- */
+/* ---------- Intense terminal scan implementation ---------- */
 /*
   showTerminalScan(options)
-  options:
-    durationMs: total duration (ms)
-    messages: array of message templates (strings). Templates may include {progress}.
-    typingSpeed: ms per character (base)
-    onProgress(percent)
-    onComplete()
+  - durationMs: total duration of the scan
+  - intensity: 1..3 (1 = moderate, 3 = very dense)
+  - onProgress(percent)
+  - onComplete()
 */
 function showTerminalScan({
   durationMs = 1200,
-  messages = null,
-  typingSpeed = 8,
+  intensity = 3,
   onProgress = null,
   onComplete = null
 } = {}) {
-  const defaultMessages = [
-    "Initializing stream pipeline...",
-    "Resolving CDN endpoints...",
-    "Validating signature token...",
-    "Creating binary data structures...",
-    "Allocating buffer segments...",
-    "Probing codecs and capabilities...",
-    "Negotiating secure transport...",
-    "Applying adaptive bitrate policy...",
-    "Mapping segment timeline...",
-    "Verifying range request support...",
-    "Preparing playback manifest...",
-    "Finalizing handshake..."
-  ];
-  const msgs = messages && messages.length ? messages : defaultMessages;
+  // configuration scaled by intensity
+  const intensityScale = Math.max(1, Math.min(3, intensity));
+  const baseLinesPerFrame = 6 * intensityScale; // lines emitted per RAF tick baseline
+  const burstMultiplier = 3 * intensityScale;
+  const start = performance.now();
+  const end = start + durationMs;
+
+  // realistic fragments
+  const verbs = ['mkdir','touch','ln','cp','mv','curl','openssl','ffprobe','ffmpeg','segmenter','hash','verify','stat','chmod','chown','rsync','wget','cat','sed','awk','split'];
+  const dirs = ['/var/cache/cdn','/tmp/segments','/srv/media','/mnt/storage','/opt/streamer','/run/session','/data/streams','/var/lib/hls'];
+  const files = ['segment-0001.ts','segment-0002.ts','index.m3u8','manifest.json','chunk-12.bin','init.mp4','audio-001.aac','meta.json'];
+  const hosts = ['edge01.cdn.example','edge02.cdn.example','origin01.internal','proxy-nyc','proxy-sfo','cache-eu'];
+  const hashes = ['a3f5c2','9b7d1e','ff12ab','c0ffee','deadbe','b16b00b5','7e57c0de','8badf00d'];
 
   terminalLines.innerHTML = '';
   terminalOverlay.style.display = 'flex';
@@ -178,116 +175,134 @@ function showTerminalScan({
   terminalStatusLeft.textContent = 'Scanning';
   terminalStatusRight.textContent = '0%';
 
-  const start = performance.now();
-  const end = start + durationMs;
   let raf = null;
-  let typingTimer = null;
+  let printed = 0;
 
-  function appendLineInstant(text, cls = '') {
+  function appendLine(text, cls = '') {
     const el = document.createElement('div');
     el.className = 'terminal-line ' + cls;
     el.textContent = text;
     terminalLines.appendChild(el);
-    // reveal
-    requestAnimationFrame(()=> {
+    // reveal with micro animation
+    requestAnimationFrame(() => {
       el.style.opacity = '1';
       el.style.transform = 'translateY(0)';
       terminalLines.scrollTop = terminalLines.scrollHeight;
     });
+    printed++;
+    // keep DOM size reasonable: trim older lines if too many
+    const maxLines = 400 + intensityScale * 200;
+    if (terminalLines.children.length > maxLines) {
+      // remove first 40 lines
+      for (let i = 0; i < 40; i++) {
+        if (terminalLines.firstChild) terminalLines.removeChild(terminalLines.firstChild);
+      }
+    }
   }
 
-  function typeLine(text, speed = typingSpeed) {
-    return new Promise(resolve => {
-      const el = document.createElement('div');
-      el.className = 'terminal-line';
-      terminalLines.appendChild(el);
-      terminalLines.scrollTop = terminalLines.scrollHeight;
-      let i = 0;
-      function step() {
-        if (i <= text.length) {
-          el.textContent = text.slice(0, i);
-          terminalLines.scrollTop = terminalLines.scrollHeight;
-          i++;
-          typingTimer = setTimeout(step, speed + Math.random() * (speed * 0.6));
-        } else {
-          const cursor = document.createElement('span');
-          cursor.className = 'terminal-cursor';
-          el.appendChild(cursor);
-          setTimeout(() => {
-            cursor.remove();
-            el.style.opacity = '1';
-            el.style.transform = 'translateY(0)';
-            resolve();
-          }, 180);
-        }
-      }
-      step();
-    });
+  function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+  function nowTimestamp() {
+    const d = new Date();
+    return d.toISOString().replace('T',' ').split('.')[0];
   }
 
-  async function run() {
-    const total = msgs.length;
-    const schedule = msgs.map((m, idx) => {
-      const t = start + (durationMs * (idx + 1) / (total + 1));
-      const jitter = (Math.random() - 0.5) * (durationMs * 0.08);
-      return Math.max(start + 60, Math.min(end - 60, t + jitter));
-    });
+  // generate a single realistic line
+  function generateLine(t) {
+    const r = Math.random();
+    if (r < 0.12) {
+      // directory creation
+      const d = dirs[randomInt(0, dirs.length - 1)];
+      const name = Math.random().toString(36).slice(2, 9);
+      return { text: `${nowTimestamp()}  mkdir -p ${d}/${name}`, cls: 'ok' };
+    } else if (r < 0.26) {
+      // file touch / write
+      const d = dirs[randomInt(0, dirs.length - 1)];
+      const f = files[randomInt(0, files.length - 1)];
+      return { text: `${nowTimestamp()}  touch ${d}/${f}`, cls: 'ok' };
+    } else if (r < 0.44) {
+      // network fetch
+      const h = hosts[randomInt(0, hosts.length - 1)];
+      const seg = `segment-${String(randomInt(1,9999)).padStart(4,'0')}.ts`;
+      const kb = randomInt(20, 1400);
+      const ms = randomInt(40, 420);
+      return { text: `${nowTimestamp()}  curl -sS "https://${h}/${seg}" -o /tmp/${seg}  (${kb} KB, ${ms} ms)`, cls: 'ok' };
+    } else if (r < 0.62) {
+      // hashing
+      const f = files[randomInt(0, files.length - 1)];
+      const h = hashes[randomInt(0, hashes.length - 1)] + randomInt(0,999).toString(16);
+      return { text: `${nowTimestamp()}  hash ${f} => ${h}`, cls: 'ok' };
+    } else if (r < 0.74) {
+      // ffprobe / ffmpeg
+      const f = files[randomInt(0, files.length - 1)];
+      return { text: `${nowTimestamp()}  ffprobe -v error -show_format -show_streams ${f}`, cls: 'ok' };
+    } else if (r < 0.86) {
+      // throughput / ETA
+      const mbps = (Math.random() * 60 + 5).toFixed(1);
+      const eta = Math.max(1, Math.floor((1 - t) * (Math.random() * 18 + 2)));
+      return { text: `${nowTimestamp()}  transfer: ${mbps} MB/s  ETA: ${eta}s`, cls: 'ok' };
+    } else if (r < 0.96) {
+      // warnings
+      const w = ['WARN: segment mismatch','WARN: retrying fetch','WARN: slow peer detected','WARN: checksum delayed'];
+      return { text: `${nowTimestamp()}  ${w[randomInt(0, w.length - 1)]}`, cls: 'warn' };
+    } else {
+      // errors (rare)
+      const e = ['ERROR: failed to verify signature','ERROR: segment corrupted','ERROR: network timeout'];
+      return { text: `${nowTimestamp()}  ${e[randomInt(0, e.length - 1)]} (code=${randomInt(100,999)})`, cls: 'err' };
+    }
+  }
 
-    for (let i = 0; i < msgs.length; i++) {
-      const target = schedule[i];
-      await new Promise(res => {
-        function waitTick(now) {
-          if (now >= target || now >= end - 60) res();
-          else raf = requestAnimationFrame(waitTick);
-        }
-        raf = requestAnimationFrame(waitTick);
-      });
-      const now = performance.now();
-      const pct = Math.min(100, Math.floor(((now - start) / durationMs) * 100));
-      const templ = msgs[i].replace(/\{progress\}/g, `${pct}%`);
-      // mix typing and instant lines for variety
-      if (Math.random() > 0.35) {
-        await typeLine(templ);
-      } else {
-        appendLineInstant(templ);
-      }
-      terminalStatusRight.textContent = `${pct}%`;
-      if (onProgress) onProgress(pct);
+  // main emitter
+  function tick(now) {
+    const t = Math.min(1, (now - start) / durationMs);
+    const pct = Math.floor(t * 100);
+    terminalStatusRight.textContent = `${pct}%`;
+
+    // dynamic count: base + burst
+    const burst = Math.floor(Math.abs(Math.sin(t * Math.PI * 6)) * burstMultiplier);
+    const count = baseLinesPerFrame + burst + randomInt(0, 4);
+
+    for (let i = 0; i < count; i++) {
+      const line = generateLine(t);
+      appendLine(line.text, line.cls === 'ok' ? 'terminal-line ok' : (line.cls === 'warn' ? 'terminal-line warn' : 'terminal-line err'));
     }
 
-    // finish ramp
-    await new Promise(res => {
-      const finishStart = performance.now();
-      function finishTick(now) {
-        const t = Math.min(1, (now - finishStart) / 260);
-        const pct = Math.min(100, Math.floor(((performance.now() - start) / durationMs) * 100 + t * (100 - ((performance.now() - start) / durationMs) * 100)));
-        terminalStatusRight.textContent = `${pct}%`;
-        if (onProgress) onProgress(pct);
-        if (t < 1) raf = requestAnimationFrame(finishTick);
-        else res();
-      }
-      raf = requestAnimationFrame(finishTick);
-    });
+    // occasionally inject a progress bar style line
+    if (Math.random() < 0.08 * intensityScale) {
+      const barPct = Math.min(100, Math.floor(pct + (Math.random() * 8 - 4)));
+      const bar = `[${'='.repeat(Math.floor(barPct/5))}${' '.repeat(20 - Math.floor(barPct/5))}] ${barPct}%`;
+      appendLine(`${nowTimestamp()}  ${bar}`, 'terminal-line ok');
+    }
 
-    await typeLine("Scan complete. Preparing playback...");
+    // auto-scroll
+    terminalLines.scrollTop = terminalLines.scrollHeight;
+
+    if (now < end) {
+      raf = requestAnimationFrame(tick);
+      if (onProgress) onProgress(pct);
+    } else {
+      finalize();
+    }
+  }
+
+  function finalize() {
+    appendLine(`${nowTimestamp()}  verifying segments... OK`, 'terminal-line ok');
+    appendLine(`${nowTimestamp()}  applying adaptive-bitrate policy... OK`, 'terminal-line ok');
+    appendLine(`${nowTimestamp()}  finalizing manifest... OK`, 'terminal-line ok');
+    appendLine(`${nowTimestamp()}  Scan complete. Preparing playback...`, 'terminal-line ok');
     terminalStatusRight.textContent = '100%';
     if (onProgress) onProgress(100);
-
     setTimeout(() => {
       terminalOverlay.style.display = 'none';
       if (onComplete) onComplete();
     }, 260);
   }
 
-  run().catch(err => {
-    console.warn('terminal scan error', err);
-    terminalOverlay.style.display = 'none';
-    if (onComplete) onComplete();
-  });
+  // start
+  raf = requestAnimationFrame(tick);
 
+  // return cancel function
   return () => {
     if (raf) cancelAnimationFrame(raf);
-    if (typingTimer) clearTimeout(typingTimer);
     terminalOverlay.style.display = 'none';
   };
 }
@@ -299,18 +314,11 @@ async function attachSource(url) {
   const isHls = /\.m3u8($|\?)/i.test(url);
   const canPlayHlsNatively = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
+  // show intense terminal scan then attach
   showTerminalScan({
-    durationMs: 1100,
-    messages: [
-      "Initializing stream pipeline...",
-      "Resolving CDN endpoints...",
-      "Creating binary data structures...",
-      "Probing codecs and capabilities...",
-      "Applying adaptive bitrate policy...",
-      "Finalizing handshake..."
-    ],
-    typingSpeed: 6,
-    onProgress: (p) => { /* optional */ },
+    durationMs: 1200,
+    intensity: 3, // very dense
+    onProgress: (p) => { /* optional hook */ },
     onComplete: async () => {
       if (isHls && !canPlayHlsNatively) {
         try {
@@ -348,7 +356,7 @@ async function attachSource(url) {
         source.src = url;
         video.appendChild(source);
         video.load();
-        await waitForEvent(video, 'loadedmetadata', 8000);
+        await waitForEvent(video, 'loadedmetadata', 9000);
         hideMessage();
         try { await video.play(); } catch {}
         return;
@@ -387,7 +395,7 @@ function waitForEvent(el, eventName, timeout = 5000) {
   });
 }
 
-/* ---------- UI wiring ---------- */
+/* ---------- UI wiring (controls) ---------- */
 bigPlay.addEventListener('click', ()=> video.play());
 playBtn.addEventListener('click', ()=> video.paused ? video.play() : video.pause());
 
@@ -609,15 +617,8 @@ video.addEventListener('error', (ev) => {
 downloadBtn.addEventListener('click', (e) => {
   e.preventDefault();
   showTerminalScan({
-    durationMs: 1400,
-    messages: [
-      "Preparing download package...",
-      "Creating binary data...",
-      "Packaging segments...",
-      "Generating secure token...",
-      "Finalizing download link..."
-    ],
-    typingSpeed: 6,
+    durationMs: 1600,
+    intensity: 3,
     onComplete: () => {
       try { window.open(rawUrl, '_blank', 'noopener'); } catch (err) { window.location.href = rawUrl; }
     }
