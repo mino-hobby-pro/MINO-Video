@@ -1,8 +1,8 @@
 // index.js (ES module)
-// Full-featured stream player with an intense, realistic terminal-style loader.
-// - Replace data-src on #player with your stream URL (mp4 or .m3u8).
-// - The terminal loader prints massive, command-line-like output (mkdir, hashing, transfers, % progress, ETA).
-// - Uses hls.js dynamically for .m3u8 when needed. Playback uses native <video> where possible.
+// Full-featured stream player with an ultra-dense, bottom-up terminal loader.
+// Replace data-src on #player with your stream URL (mp4 or .m3u8).
+// This file contains the complete player logic and a revamped showTerminalScan
+// that emits a huge volume of command-like lines appearing from the bottom at very high speed.
 
 const container = document.getElementById('player');
 if (!container) throw new Error('player container not found');
@@ -80,7 +80,7 @@ pipBadge.style.display = 'none';
 const message = document.createElement('div'); message.className = 'message'; message.style.display = 'none';
 message.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style="opacity:.95"><path d="M11 15h2v2h-2zM11 7h2v6h-2z"/></svg><div><div class="msg-text">Loading…</div><div class="diagnostics" style="display:none"></div></div>`;
 
-/* terminal overlay (intense output) */
+/* terminal overlay (ultra-fast bottom-up output) */
 const terminalOverlay = document.createElement('div');
 terminalOverlay.className = 'terminal-overlay';
 terminalOverlay.innerHTML = `
@@ -141,33 +141,38 @@ function showMessage(text, diagnostics){
 }
 function hideMessage(){ message.style.display = 'none'; }
 
-/* ---------- Intense terminal scan implementation ---------- */
+/* ---------- Ultra-fast bottom-up terminal scan implementation ---------- */
 /*
   showTerminalScan(options)
   - durationMs: total duration of the scan
-  - intensity: 1..3 (1 = moderate, 3 = very dense)
+  - density: 1..5 (higher = more lines per frame)
   - onProgress(percent)
   - onComplete()
+  Behavior:
+  - Emits a very large number of lines per animation frame.
+  - New lines are appended at the bottom and the container auto-scrolls upward,
+    creating the impression of a flood of output coming from the bottom.
 */
 function showTerminalScan({
-  durationMs = 1200,
-  intensity = 3,
+  durationMs = 1000,
+  density = 5,
   onProgress = null,
   onComplete = null
 } = {}) {
-  // configuration scaled by intensity
-  const intensityScale = Math.max(1, Math.min(3, intensity));
-  const baseLinesPerFrame = 6 * intensityScale; // lines emitted per RAF tick baseline
-  const burstMultiplier = 3 * intensityScale;
+  // clamp density
+  const D = Math.max(1, Math.min(5, Math.floor(density)));
+  // scale counts aggressively for "super-fast" effect
+  const basePerFrame = 8 * D;       // baseline lines per RAF tick
+  const burstMax = 40 * D;         // occasional bursts
   const start = performance.now();
   const end = start + durationMs;
 
   // realistic fragments
-  const verbs = ['mkdir','touch','ln','cp','mv','curl','openssl','ffprobe','ffmpeg','segmenter','hash','verify','stat','chmod','chown','rsync','wget','cat','sed','awk','split'];
-  const dirs = ['/var/cache/cdn','/tmp/segments','/srv/media','/mnt/storage','/opt/streamer','/run/session','/data/streams','/var/lib/hls'];
-  const files = ['segment-0001.ts','segment-0002.ts','index.m3u8','manifest.json','chunk-12.bin','init.mp4','audio-001.aac','meta.json'];
-  const hosts = ['edge01.cdn.example','edge02.cdn.example','origin01.internal','proxy-nyc','proxy-sfo','cache-eu'];
-  const hashes = ['a3f5c2','9b7d1e','ff12ab','c0ffee','deadbe','b16b00b5','7e57c0de','8badf00d'];
+  const verbs = ['mkdir','touch','ln','cp','mv','curl','openssl','ffprobe','ffmpeg','segmenter','hash','verify','stat','chmod','chown','rsync','wget','cat','sed','awk','split','tar','gzip'];
+  const dirs = ['/var/cache/cdn','/tmp/segments','/srv/media','/mnt/storage','/opt/streamer','/run/session','/data/streams','/var/lib/hls','/usr/local/bin'];
+  const files = ['segment-0001.ts','segment-0002.ts','index.m3u8','manifest.json','chunk-12.bin','init.mp4','audio-001.aac','meta.json','thumb.jpg'];
+  const hosts = ['edge01.cdn.example','edge02.cdn.example','origin01.internal','proxy-nyc','proxy-sfo','cache-eu','cdn-lon'];
+  const hashes = ['a3f5c2','9b7d1e','ff12ab','c0ffee','deadbe','b16b00b5','7e57c0de','8badf00d','cafebabe'];
 
   terminalLines.innerHTML = '';
   terminalOverlay.style.display = 'flex';
@@ -176,125 +181,118 @@ function showTerminalScan({
   terminalStatusRight.textContent = '0%';
 
   let raf = null;
-  let printed = 0;
+  let totalPrinted = 0;
 
-  function appendLine(text, cls = '') {
-    const el = document.createElement('div');
-    el.className = 'terminal-line ' + cls;
-    el.textContent = text;
-    terminalLines.appendChild(el);
-    // reveal with micro animation
-    requestAnimationFrame(() => {
-      el.style.opacity = '1';
-      el.style.transform = 'translateY(0)';
-      terminalLines.scrollTop = terminalLines.scrollHeight;
-    });
-    printed++;
-    // keep DOM size reasonable: trim older lines if too many
-    const maxLines = 400 + intensityScale * 200;
-    if (terminalLines.children.length > maxLines) {
-      // remove first 40 lines
-      for (let i = 0; i < 40; i++) {
-        if (terminalLines.firstChild) terminalLines.removeChild(terminalLines.firstChild);
-      }
-    }
-  }
-
-  function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
   function nowTimestamp() {
     const d = new Date();
     return d.toISOString().replace('T',' ').split('.')[0];
   }
 
-  // generate a single realistic line
-  function generateLine(t) {
+  function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+  function genLine(t) {
     const r = Math.random();
-    if (r < 0.12) {
-      // directory creation
+    if (r < 0.10) {
       const d = dirs[randomInt(0, dirs.length - 1)];
       const name = Math.random().toString(36).slice(2, 9);
       return { text: `${nowTimestamp()}  mkdir -p ${d}/${name}`, cls: 'ok' };
-    } else if (r < 0.26) {
-      // file touch / write
+    } else if (r < 0.22) {
       const d = dirs[randomInt(0, dirs.length - 1)];
       const f = files[randomInt(0, files.length - 1)];
       return { text: `${nowTimestamp()}  touch ${d}/${f}`, cls: 'ok' };
-    } else if (r < 0.44) {
-      // network fetch
+    } else if (r < 0.40) {
       const h = hosts[randomInt(0, hosts.length - 1)];
       const seg = `segment-${String(randomInt(1,9999)).padStart(4,'0')}.ts`;
-      const kb = randomInt(20, 1400);
-      const ms = randomInt(40, 420);
+      const kb = randomInt(20, 2000);
+      const ms = randomInt(20, 600);
       return { text: `${nowTimestamp()}  curl -sS "https://${h}/${seg}" -o /tmp/${seg}  (${kb} KB, ${ms} ms)`, cls: 'ok' };
-    } else if (r < 0.62) {
-      // hashing
+    } else if (r < 0.58) {
       const f = files[randomInt(0, files.length - 1)];
       const h = hashes[randomInt(0, hashes.length - 1)] + randomInt(0,999).toString(16);
       return { text: `${nowTimestamp()}  hash ${f} => ${h}`, cls: 'ok' };
-    } else if (r < 0.74) {
-      // ffprobe / ffmpeg
+    } else if (r < 0.72) {
       const f = files[randomInt(0, files.length - 1)];
       return { text: `${nowTimestamp()}  ffprobe -v error -show_format -show_streams ${f}`, cls: 'ok' };
     } else if (r < 0.86) {
-      // throughput / ETA
-      const mbps = (Math.random() * 60 + 5).toFixed(1);
-      const eta = Math.max(1, Math.floor((1 - t) * (Math.random() * 18 + 2)));
+      const mbps = (Math.random() * 120 + 10).toFixed(1);
+      const eta = Math.max(1, Math.floor((1 - t) * (Math.random() * 30 + 2)));
       return { text: `${nowTimestamp()}  transfer: ${mbps} MB/s  ETA: ${eta}s`, cls: 'ok' };
-    } else if (r < 0.96) {
-      // warnings
-      const w = ['WARN: segment mismatch','WARN: retrying fetch','WARN: slow peer detected','WARN: checksum delayed'];
+    } else if (r < 0.98) {
+      const w = ['WARN: segment mismatch','WARN: retrying fetch','WARN: slow peer detected','WARN: checksum delayed','WARN: high latency'];
       return { text: `${nowTimestamp()}  ${w[randomInt(0, w.length - 1)]}`, cls: 'warn' };
     } else {
-      // errors (rare)
-      const e = ['ERROR: failed to verify signature','ERROR: segment corrupted','ERROR: network timeout'];
+      const e = ['ERROR: failed to verify signature','ERROR: segment corrupted','ERROR: network timeout','ERROR: disk write failed'];
       return { text: `${nowTimestamp()}  ${e[randomInt(0, e.length - 1)]} (code=${randomInt(100,999)})`, cls: 'err' };
     }
   }
 
-  // main emitter
+  // Append line at bottom and keep scroll anchored to bottom so new lines appear from bottom upward visually.
+  function appendLineBottom(text, cls = 'terminal-line ok') {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    terminalLines.appendChild(el);
+    // reveal micro-animation
+    requestAnimationFrame(() => {
+      el.style.opacity = '1';
+      el.style.transform = 'translateY(0)';
+      // keep scroll pinned to bottom so new lines appear from bottom
+      terminalLines.scrollTop = terminalLines.scrollHeight;
+    });
+    totalPrinted++;
+    // trim to keep DOM manageable
+    const maxLines = 1200; // allow many lines for intense effect
+    if (terminalLines.children.length > maxLines) {
+      // remove oldest 120 lines
+      for (let i = 0; i < 120; i++) {
+        if (terminalLines.firstChild) terminalLines.removeChild(terminalLines.firstChild);
+      }
+    }
+  }
+
   function tick(now) {
     const t = Math.min(1, (now - start) / durationMs);
     const pct = Math.floor(t * 100);
     terminalStatusRight.textContent = `${pct}%`;
 
-    // dynamic count: base + burst
-    const burst = Math.floor(Math.abs(Math.sin(t * Math.PI * 6)) * burstMultiplier);
-    const count = baseLinesPerFrame + burst + randomInt(0, 4);
+    // compute how many lines to emit this frame
+    // base + random jitter + occasional burst
+    const jitter = randomInt(0, 6 * D);
+    const burst = (Math.random() < 0.12) ? randomInt(8 * D, burstMax) : 0;
+    const count = basePerFrame + jitter + burst;
 
     for (let i = 0; i < count; i++) {
-      const line = generateLine(t);
-      appendLine(line.text, line.cls === 'ok' ? 'terminal-line ok' : (line.cls === 'warn' ? 'terminal-line warn' : 'terminal-line err'));
+      const line = genLine(t);
+      const cls = line.cls === 'ok' ? 'terminal-line ok' : (line.cls === 'warn' ? 'terminal-line warn' : 'terminal-line err');
+      appendLineBottom(line.text, cls);
     }
 
-    // occasionally inject a progress bar style line
-    if (Math.random() < 0.08 * intensityScale) {
-      const barPct = Math.min(100, Math.floor(pct + (Math.random() * 8 - 4)));
-      const bar = `[${'='.repeat(Math.floor(barPct/5))}${' '.repeat(20 - Math.floor(barPct/5))}] ${barPct}%`;
-      appendLine(`${nowTimestamp()}  ${bar}`, 'terminal-line ok');
+    // occasionally print a progress bar line for realism
+    if (Math.random() < 0.12 * D) {
+      const barPct = Math.min(100, Math.floor(pct + randomInt(-6, 6)));
+      const filled = Math.floor(barPct / 4);
+      const bar = `[${'█'.repeat(filled)}${' '.repeat(25 - filled)}] ${barPct}%`;
+      appendLineBottom(`${nowTimestamp()}  ${bar}`, 'terminal-line ok');
     }
 
-    // auto-scroll
-    terminalLines.scrollTop = terminalLines.scrollHeight;
+    // update progress callback
+    if (onProgress) onProgress(pct);
 
     if (now < end) {
       raf = requestAnimationFrame(tick);
-      if (onProgress) onProgress(pct);
     } else {
-      finalize();
+      // finalize
+      appendLineBottom(`${nowTimestamp()}  verifying segments... OK`, 'terminal-line ok');
+      appendLineBottom(`${nowTimestamp()}  applying adaptive-bitrate policy... OK`, 'terminal-line ok');
+      appendLineBottom(`${nowTimestamp()}  finalizing manifest... OK`, 'terminal-line ok');
+      appendLineBottom(`${nowTimestamp()}  Scan complete. Preparing playback...`, 'terminal-line ok');
+      terminalStatusRight.textContent = '100%';
+      if (onProgress) onProgress(100);
+      setTimeout(() => {
+        terminalOverlay.style.display = 'none';
+        if (onComplete) onComplete();
+      }, 220);
     }
-  }
-
-  function finalize() {
-    appendLine(`${nowTimestamp()}  verifying segments... OK`, 'terminal-line ok');
-    appendLine(`${nowTimestamp()}  applying adaptive-bitrate policy... OK`, 'terminal-line ok');
-    appendLine(`${nowTimestamp()}  finalizing manifest... OK`, 'terminal-line ok');
-    appendLine(`${nowTimestamp()}  Scan complete. Preparing playback...`, 'terminal-line ok');
-    terminalStatusRight.textContent = '100%';
-    if (onProgress) onProgress(100);
-    setTimeout(() => {
-      terminalOverlay.style.display = 'none';
-      if (onComplete) onComplete();
-    }, 260);
   }
 
   // start
@@ -314,10 +312,10 @@ async function attachSource(url) {
   const isHls = /\.m3u8($|\?)/i.test(url);
   const canPlayHlsNatively = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
-  // show intense terminal scan then attach
+  // show ultra-fast terminal scan then attach
   showTerminalScan({
-    durationMs: 1200,
-    intensity: 3, // very dense
+    durationMs: 900,   // short, intense burst
+    density: 5,        // maximum density
     onProgress: (p) => { /* optional hook */ },
     onComplete: async () => {
       if (isHls && !canPlayHlsNatively) {
@@ -617,8 +615,8 @@ video.addEventListener('error', (ev) => {
 downloadBtn.addEventListener('click', (e) => {
   e.preventDefault();
   showTerminalScan({
-    durationMs: 1600,
-    intensity: 3,
+    durationMs: 1200,
+    density: 5,
     onComplete: () => {
       try { window.open(rawUrl, '_blank', 'noopener'); } catch (err) { window.location.href = rawUrl; }
     }
