@@ -1,15 +1,15 @@
 // index.js (ES module)
-// Robust, bug-hardened stream player with ultra-fast bottom-up terminal loader.
-// - Put your stream URL into data-src on the #player element (mp4 or .m3u8).
-// - This file is self-contained and written defensively to avoid race conditions and double-trigger bugs.
+// Robust, defensive stream player with terminal-style loader.
+// Guarantees the overlay never blocks playback: scan always times out/cleans up and video attach proceeds.
+// Put your stream URL into data-src on the #player element (mp4 or .m3u8).
 
 const container = document.getElementById('player');
 if (!container) throw new Error('player container not found');
 
 const rawUrl = (container.dataset.src || '').trim();
-container.innerHTML = ''; // clear any placeholder
+container.innerHTML = ''; // clear
 
-/* ---------- DOM (player chrome) ---------- */
+/* ---------- Minimal DOM (player chrome) ---------- */
 const video = document.createElement('video');
 video.playsInline = true;
 video.preload = 'metadata';
@@ -79,7 +79,7 @@ pipBadge.style.display = 'none';
 const message = document.createElement('div'); message.className = 'message'; message.style.display = 'none';
 message.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style="opacity:.95"><path d="M11 15h2v2h-2zM11 7h2v6h-2z"/></svg><div><div class="msg-text">Loading…</div><div class="diagnostics" style="display:none"></div></div>`;
 
-/* terminal overlay (ultra-fast bottom-up output) */
+/* terminal overlay (bottom-up flood) */
 const terminalOverlay = document.createElement('div');
 terminalOverlay.className = 'terminal-overlay';
 terminalOverlay.innerHTML = `
@@ -90,7 +90,7 @@ terminalOverlay.innerHTML = `
 `;
 terminalOverlay.style.display = 'none';
 
-/* assemble into container */
+/* assemble */
 container.appendChild(video);
 container.appendChild(center);
 container.appendChild(controls);
@@ -109,54 +109,26 @@ const terminalLines = terminalOverlay.querySelector('.terminal-lines');
 const terminalStatusLeft = terminalOverlay.querySelector('.terminal-status .left');
 const terminalStatusRight = terminalOverlay.querySelector('.terminal-status .right');
 
-/* small helpers */
-function fmt(s){
-  if (!s || isNaN(s)) return '00:00';
-  const m = Math.floor(s/60), sec = Math.floor(s%60);
-  return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
-}
-function setPlayIcon(paused){
-  playBtn.innerHTML = paused
-    ? `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>`
-    : `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
-}
-function setMuteIcon(muted, vol){
-  if (muted || vol === 0) {
-    volBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-.77-3.36-1.98-4.47l-1.42 1.42A4.48 4.48 0 0 1 15.5 12c0 1.24-.5 2.36-1.3 3.16l1.42 1.42A6.48 6.48 0 0 0 16.5 12zM19 12c0 2.76-1.12 5.26-2.93 7.07l1.41 1.41C19.07 18.07 20 15.13 20 12s-.93-6.07-2.52-8.48l-1.41 1.41C17.88 6.74 19 9.24 19 12zM5 9v6h4l5 5V4L9 9H5z"/></svg>`;
-  } else {
-    volBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5z"/></svg>`;
-  }
-}
-function showMessage(text, diagnostics){
-  msgText.textContent = text;
-  if (diagnostics) {
-    diagEl.style.display = 'block';
-    diagEl.textContent = diagnostics;
-  } else {
-    diagEl.style.display = 'none';
-    diagEl.textContent = '';
-  }
-  message.style.display = 'flex';
-}
+/* helpers */
+function fmt(s){ if (!s || isNaN(s)) return '00:00'; const m=Math.floor(s/60), sec=Math.floor(s%60); return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`; }
+function setPlayIcon(paused){ playBtn.innerHTML = paused ? `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>` : `<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`; }
+function setMuteIcon(muted, vol){ if (muted || vol === 0) volBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-.77-3.36-1.98-4.47l-1.42 1.42A4.48 4.48 0 0 1 15.5 12c0 1.24-.5 2.36-1.3 3.16l1.42 1.42A6.48 6.48 0 0 0 16.5 12zM19 12c0 2.76-1.12 5.26-2.93 7.07l1.41 1.41C19.07 18.07 20 15.13 20 12s-.93-6.07-2.52-8.48l-1.41 1.41C17.88 6.74 19 9.24 19 12zM5 9v6h4l5 5V4L9 9H5z"/></svg>`; else volBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 5V4L9 9H5z"/></svg>`; }
+function showMessage(text, diagnostics){ msgText.textContent = text; if (diagnostics) { diagEl.style.display = 'block'; diagEl.textContent = diagnostics; } else { diagEl.style.display = 'none'; diagEl.textContent = ''; } message.style.display = 'flex'; }
 function hideMessage(){ message.style.display = 'none'; }
 
-/* ---------- showTerminalScan: returns a Promise and a cancel function ---------- */
+/* ---------- showTerminalScanPromise (defensive) ---------- */
 /*
-  options:
-    durationMs: total duration
-    density: 1..5 (higher = more lines per frame)
-    onProgress(percent)
-  returns:
-    { promise, cancel } where promise resolves when scan completes (or rejects on cancel)
+  Returns { promise, cancel }.
+  promise resolves when scan completes; rejects on cancel.
+  The function ensures overlay is hidden on any outcome.
 */
-function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = null } = {}) {
-  const D = Math.max(1, Math.min(5, Math.floor(density)));
+function showTerminalScanPromise({ durationMs = 1000, density = 4, onProgress = null } = {}) {
+  const D = Math.max(1, Math.min(6, Math.floor(density)));
   const basePerFrame = 8 * D;
   const burstMax = 40 * D;
   const start = performance.now();
   const end = start + durationMs;
 
-  const verbs = ['mkdir','touch','ln','cp','mv','curl','openssl','ffprobe','ffmpeg','segmenter','hash','verify','stat','chmod','chown','rsync','wget','cat','sed','awk','split','tar','gzip'];
   const dirs = ['/var/cache/cdn','/tmp/segments','/srv/media','/mnt/storage','/opt/streamer','/run/session','/data/streams','/var/lib/hls','/usr/local/bin'];
   const files = ['segment-0001.ts','segment-0002.ts','index.m3u8','manifest.json','chunk-12.bin','init.mp4','audio-001.aac','meta.json','thumb.jpg'];
   const hosts = ['edge01.cdn.example','edge02.cdn.example','origin01.internal','proxy-nyc','proxy-sfo','cache-eu','cdn-lon'];
@@ -170,11 +142,9 @@ function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = 
 
   let raf = null;
   let cancelled = false;
+  let resolved = false;
 
-  function nowTimestamp() {
-    const d = new Date();
-    return d.toISOString().replace('T',' ').split('.')[0];
-  }
+  function nowTimestamp() { const d = new Date(); return d.toISOString().replace('T',' ').split('.')[0]; }
   function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
   function genLine(t) {
@@ -223,7 +193,6 @@ function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = 
       el.style.transform = 'translateY(0)';
       terminalLines.scrollTop = terminalLines.scrollHeight;
     });
-    // trim
     const maxLines = 1200;
     if (terminalLines.children.length > maxLines) {
       for (let i = 0; i < 120; i++) {
@@ -232,10 +201,11 @@ function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = 
     }
   }
 
-  function tick(now, resolve) {
+  function tick(now, resolve, reject) {
     if (cancelled) {
       terminalOverlay.style.display = 'none';
-      return resolve(new Error('cancelled'));
+      if (!resolved) { resolved = true; reject(new Error('cancelled')); }
+      return;
     }
     const t = Math.min(1, (now - start) / durationMs);
     const pct = Math.floor(t * 100);
@@ -258,58 +228,91 @@ function showTerminalScanPromise({ durationMs = 1000, density = 5, onProgress = 
       appendLineBottom(`${nowTimestamp()}  ${bar}`, 'terminal-line ok');
     }
 
-    if (onProgress) onProgress(pct);
+    if (typeof onProgress === 'function') {
+      try { onProgress(pct); } catch (e) { /* ignore */ }
+    }
 
     if (now < end) {
-      raf = requestAnimationFrame(n => tick(n, resolve));
+      raf = requestAnimationFrame(n => tick(n, resolve, reject));
     } else {
       appendLineBottom(`${nowTimestamp()}  verifying segments... OK`, 'terminal-line ok');
       appendLineBottom(`${nowTimestamp()}  applying adaptive-bitrate policy... OK`, 'terminal-line ok');
       appendLineBottom(`${nowTimestamp()}  finalizing manifest... OK`, 'terminal-line ok');
       appendLineBottom(`${nowTimestamp()}  Scan complete. Preparing playback...`, 'terminal-line ok');
       terminalStatusRight.textContent = '100%';
-      if (onProgress) onProgress(100);
+      if (typeof onProgress === 'function') {
+        try { onProgress(100); } catch (e) { /* ignore */ }
+      }
       setTimeout(() => {
         terminalOverlay.style.display = 'none';
-        resolve();
+        if (!resolved) { resolved = true; resolve(); }
       }, 220);
     }
   }
 
-  // return promise + cancel
   let resolveOuter, rejectOuter;
   const promise = new Promise((resolve, reject) => {
     resolveOuter = resolve;
     rejectOuter = reject;
-    raf = requestAnimationFrame(n => tick(n, resolve));
+    raf = requestAnimationFrame(n => tick(n, resolve, reject));
   });
 
+  // safety timeout: if something goes wrong, force hide and resolve after 3x duration
+  const safety = setTimeout(() => {
+    if (!resolved && !cancelled) {
+      cancelled = true;
+      terminalOverlay.style.display = 'none';
+      resolved = true;
+      rejectOuter(new Error('scan timeout'));
+    }
+  }, Math.max(3000, durationMs * 3));
+
   const cancel = () => {
+    if (resolved) return;
     cancelled = true;
     if (raf) cancelAnimationFrame(raf);
     terminalOverlay.style.display = 'none';
-    rejectOuter(new Error('cancelled'));
+    clearTimeout(safety);
+    if (!resolved) { resolved = true; rejectOuter(new Error('cancelled')); }
   };
+
+  // ensure cleanup on normal resolution/rejection
+  promise.finally(() => {
+    clearTimeout(safety);
+    terminalOverlay.style.display = 'none';
+  });
 
   return { promise, cancel };
 }
 
-/* ---------- HLS / attach ---------- */
+/* ---------- HLS / attach (guaranteed fallback) ---------- */
 let hlsInstance = null;
 async function attachSource(url) {
   if (!url) { showMessage('No source'); return; }
   const isHls = /\.m3u8($|\?)/i.test(url);
   const canPlayHlsNatively = video.canPlayType('application/vnd.apple.mpegurl') !== '';
 
-  // show scan and wait for it to complete before attaching
-  const { promise: scanPromise } = showTerminalScanPromise({ durationMs: 900, density: 5, onProgress: null });
+  // Run scan but ensure attach proceeds even if scan fails/stalls
+  const { promise: scanPromise, cancel: scanCancel } = showTerminalScanPromise({ durationMs: 900, density: 5, onProgress: null });
+
+  // Use a race: either scan completes or a hard timeout elapses — then proceed
+  const hardTimeoutMs = 2500; // maximum wait for scan before forcing attach
+  let scanCompleted = false;
   try {
-    await scanPromise;
+    await Promise.race([
+      scanPromise.then(() => { scanCompleted = true; }),
+      new Promise((res, rej) => setTimeout(() => res('scan-timeout'), hardTimeoutMs))
+    ]);
   } catch (err) {
-    // if scan was cancelled or failed, continue to attempt attach but show message
-    console.warn('scan aborted or failed', err);
+    // scan rejected (cancelled or error) — continue to attach
+    console.warn('scan promise rejected', err);
+  } finally {
+    // ensure overlay hidden and cancel any running scan
+    try { scanCancel(); } catch {}
+    terminalOverlay.style.display = 'none';
   }
 
+  // Proceed to attach playback (always attempt)
   if (isHls && !canPlayHlsNatively) {
     try {
       showMessage('Loading HLS engine…');
@@ -329,27 +332,27 @@ async function attachSource(url) {
         return;
       } else {
         showMessage('HLS not supported');
-        return;
+        // fallback to direct assignment below
       }
     } catch (err) {
       console.warn('Failed to load hls.js', err);
-      showMessage('HLS engine failed', String(err));
-      return;
+      // fallback to direct assignment below
     }
   }
 
-  // MP4 or native HLS: assign via <source>
+  // MP4 or fallback: assign via <source> and always attempt to play
   try {
     showMessage('Loading…');
     while (video.firstChild) video.removeChild(video.firstChild);
     const source = document.createElement('source');
     source.src = url;
     video.appendChild(source);
+    // attempt load and play but never block UI: use timeout
+    const loadPromise = waitForEvent(video, 'loadedmetadata', 9000).catch(() => { /* ignore */ });
     video.load();
-    await waitForEvent(video, 'loadedmetadata', 9000);
+    await loadPromise;
     hideMessage();
-    try { await video.play(); } catch {}
-    return;
+    try { await video.play(); } catch (err) { /* autoplay may be blocked; user can press play */ }
   } catch (err) {
     console.warn('Direct assignment failed', err);
     const code = video.error?.code ?? 'none';
@@ -415,107 +418,40 @@ video.addEventListener('ended', ()=> {
 
 /* progress interactions */
 let seeking = false;
-function seekToRatio(ratio){
-  if (!video.duration) return;
-  video.currentTime = Math.max(0, Math.min(1, ratio)) * video.duration;
-}
-progress.addEventListener('click', (e) => {
-  const r = progress.getBoundingClientRect();
-  const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  seekToRatio(x);
-});
-progress.addEventListener('pointerdown', (e) => {
-  seeking = true;
-  try { progress.setPointerCapture(e.pointerId); } catch {}
-});
-progress.addEventListener('pointermove', (e) => {
-  if (!seeking) return;
-  const r = progress.getBoundingClientRect();
-  const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  thumb.style.left = (x*100) + '%';
-});
-progress.addEventListener('pointerup', (e) => {
-  if (!seeking) return;
-  seeking = false;
-  const r = progress.getBoundingClientRect();
-  const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  seekToRatio(x);
-  try { progress.releasePointerCapture(e.pointerId); } catch {}
-});
+function seekToRatio(ratio){ if (!video.duration) return; video.currentTime = Math.max(0, Math.min(1, ratio)) * video.duration; }
+progress.addEventListener('click', (e) => { const r = progress.getBoundingClientRect(); const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); seekToRatio(x); });
+progress.addEventListener('pointerdown', (e) => { seeking = true; try { progress.setPointerCapture(e.pointerId); } catch {} });
+progress.addEventListener('pointermove', (e) => { if (!seeking) return; const r = progress.getBoundingClientRect(); const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); thumb.style.left = (x*100) + '%'; });
+progress.addEventListener('pointerup', (e) => { if (!seeking) return; seeking = false; const r = progress.getBoundingClientRect(); const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); seekToRatio(x); try { progress.releasePointerCapture(e.pointerId); } catch {} });
 
 /* buffer indicator */
-function updateBuffer(){
-  try {
-    const ranges = video.buffered;
-    if (!ranges || ranges.length === 0) { bufferBar.style.width = '0%'; return; }
-    const end = ranges.end(ranges.length - 1);
-    const pct = (end / (video.duration || 1)) * 100;
-    bufferBar.style.width = Math.min(100, pct) + '%';
-  } catch (e) { bufferBar.style.width = '0%'; }
-}
+function updateBuffer(){ try { const ranges = video.buffered; if (!ranges || ranges.length === 0) { bufferBar.style.width = '0%'; return; } const end = ranges.end(ranges.length - 1); const pct = (end / (video.duration || 1)) * 100; bufferBar.style.width = Math.min(100, pct) + '%'; } catch (e) { bufferBar.style.width = '0%'; } }
 
 /* volume */
-volTrack.addEventListener('click', (e) => {
-  const r = volTrack.getBoundingClientRect();
-  const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  video.volume = x;
-  video.muted = false;
-  volBar.style.width = (x * 100) + '%';
-  setMuteIcon(false, x);
-});
-volBtn.addEventListener('click', ()=> {
-  video.muted = !video.muted;
-  setMuteIcon(video.muted, video.volume);
-  volBar.style.width = video.muted ? '0%' : (video.volume * 100) + '%';
-});
+volTrack.addEventListener('click', (e) => { const r = volTrack.getBoundingClientRect(); const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); video.volume = x; video.muted = false; volBar.style.width = (x * 100) + '%'; setMuteIcon(false, x); });
+volBtn.addEventListener('click', ()=> { video.muted = !video.muted; setMuteIcon(video.muted, video.volume); volBar.style.width = video.muted ? '0%' : (video.volume * 100) + '%'; });
 
 /* speed */
-speedSelect.addEventListener('change', ()=> {
-  video.playbackRate = Number(speedSelect.value);
-});
+speedSelect.addEventListener('change', ()=> { video.playbackRate = Number(speedSelect.value); });
 
 /* captions toggle */
 captionsBtn.addEventListener('click', ()=> {
   const tracks = video.textTracks || [];
-  if (tracks.length === 0) {
-    showMessage('No captions available');
-    setTimeout(hideMessage, 1200);
-    return;
-  }
-  const t = tracks[0];
-  t.mode = (t.mode === 'showing') ? 'disabled' : 'showing';
-  captionsBtn.style.opacity = (t.mode === 'showing') ? '1' : '0.7';
+  if (tracks.length === 0) { showMessage('No captions available'); setTimeout(hideMessage, 1200); return; }
+  const t = tracks[0]; t.mode = (t.mode === 'showing') ? 'disabled' : 'showing'; captionsBtn.style.opacity = (t.mode === 'showing') ? '1' : '0.7';
 });
 
 /* fullscreen & double-click */
 fsBtn.addEventListener('click', toggleFullscreen);
 video.addEventListener('dblclick', toggleFullscreen);
-function toggleFullscreen(){
-  const el = container;
-  if (!document.fullscreenElement) {
-    if (el.requestFullscreen) el.requestFullscreen();
-    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-  } else {
-    if (document.exitFullscreen) document.exitFullscreen();
-    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-  }
-}
+function toggleFullscreen(){ const el = container; if (!document.fullscreenElement) { if (el.requestFullscreen) el.requestFullscreen(); else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen(); } else { if (document.exitFullscreen) document.exitFullscreen(); else if (document.webkitExitFullscreen) document.webkitExitFullscreen(); } }
 
 /* Picture-in-Picture */
 pipBtn.addEventListener('click', async ()=> {
   try {
-    if (document.pictureInPictureElement) {
-      await document.exitPictureInPicture();
-      pipBadge.style.display = 'none';
-    } else {
-      await video.requestPictureInPicture();
-      pipBadge.style.display = 'block';
-    }
-  } catch (err) {
-    console.warn('PiP failed', err);
-    showMessage('PiP not available', String(err));
-    setTimeout(hideMessage, 2500);
-  }
+    if (document.pictureInPictureElement) { await document.exitPictureInPicture(); pipBadge.style.display = 'none'; }
+    else { await video.requestPictureInPicture(); pipBadge.style.display = 'block'; }
+  } catch (err) { console.warn('PiP failed', err); showMessage('PiP not available', String(err)); setTimeout(hideMessage, 2500); }
 });
 document.addEventListener('leavepictureinpicture', ()=> pipBadge.style.display = 'none');
 
@@ -524,41 +460,19 @@ window.addEventListener('keydown', (e) => {
   if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)) return;
   switch (e.key) {
     case ' ':
-    case 'k':
-      e.preventDefault(); video.paused ? video.play() : video.pause();
-      break;
-    case 'ArrowRight':
-      video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5);
-      break;
-    case 'ArrowLeft':
-      video.currentTime = Math.max(0, video.currentTime - 5);
-      break;
-    case 'f':
-      toggleFullscreen();
-      break;
-    case 'm':
-      volBtn.click();
-      break;
-    case '.':
-      video.playbackRate = Math.min(3, video.playbackRate + 0.25);
-      speedSelect.value = video.playbackRate;
-      break;
-    case ',':
-      video.playbackRate = Math.max(0.25, video.playbackRate - 0.25);
-      speedSelect.value = video.playbackRate;
-      break;
+    case 'k': e.preventDefault(); video.paused ? video.play() : video.pause(); break;
+    case 'ArrowRight': video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5); break;
+    case 'ArrowLeft': video.currentTime = Math.max(0, video.currentTime - 5); break;
+    case 'f': toggleFullscreen(); break;
+    case 'm': volBtn.click(); break;
+    case '.': video.playbackRate = Math.min(3, video.playbackRate + 0.25); speedSelect.value = video.playbackRate; break;
+    case ',': video.playbackRate = Math.max(0.25, video.playbackRate - 0.25); speedSelect.value = video.playbackRate; break;
   }
 });
 
 /* auto-hide controls */
 let hideTimer = null;
-function showControls() {
-  controls.classList.remove('hidden');
-  if (hideTimer) clearTimeout(hideTimer);
-  hideTimer = setTimeout(()=> {
-    if (!video.paused) controls.classList.add('hidden');
-  }, 3000);
-}
+function showControls() { controls.classList.remove('hidden'); if (hideTimer) clearTimeout(hideTimer); hideTimer = setTimeout(()=> { if (!video.paused) controls.classList.add('hidden'); }, 3000); }
 container.addEventListener('mousemove', showControls);
 container.addEventListener('touchstart', showControls);
 
@@ -579,11 +493,7 @@ function populateQualityOptions(){
   qualitySelect.style.display = levels.length > 0 ? '' : 'none';
   qualitySelect.value = String(hlsInstance.currentLevel);
 }
-qualitySelect.addEventListener('change', ()=> {
-  if (!hlsInstance) return;
-  const v = Number(qualitySelect.value);
-  hlsInstance.currentLevel = v;
-});
+qualitySelect.addEventListener('change', ()=> { if (!hlsInstance) return; const v = Number(qualitySelect.value); hlsInstance.currentLevel = v; });
 
 /* diagnostics on error */
 video.addEventListener('error', (ev) => {
@@ -601,7 +511,7 @@ video.addEventListener('error', (ev) => {
   showMessage('Unable to play stream. Server or CORS restrictions may apply.', diag);
 });
 
-/* ---------- Download button behavior (defensive) ---------- */
+/* ---------- Download button (defensive) ---------- */
 let downloadInProgress = false;
 downloadBtn.addEventListener('click', async (e) => {
   e.preventDefault();
@@ -610,36 +520,31 @@ downloadBtn.addEventListener('click', async (e) => {
   downloadBtn.disabled = true;
   downloadBtn.style.opacity = '0.6';
 
-  // show scan and wait
-  const { promise: scanPromise, cancel } = showTerminalScanPromise({ durationMs: 1200, density: 5, onProgress: null });
+  const { promise: scanPromise, cancel: scanCancel } = showTerminalScanPromise({ durationMs: 1200, density: 5, onProgress: null });
+  // ensure we don't wait forever
+  const maxWait = 3000;
   try {
-    await scanPromise;
-    // open URL in new tab safely
-    try {
-      window.open(rawUrl, '_blank', 'noopener');
-    } catch (err) {
-      // fallback to same tab
-      window.location.href = rawUrl;
-    }
+    await Promise.race([scanPromise, new Promise(res => setTimeout(res, maxWait))]);
+    // open URL
+    try { window.open(rawUrl, '_blank', 'noopener'); } catch (err) { window.location.href = rawUrl; }
   } catch (err) {
-    // scan was cancelled or failed; show a brief message
     console.warn('Download scan aborted or failed', err);
     showMessage('Download cancelled or failed');
     setTimeout(hideMessage, 1200);
   } finally {
+    try { scanCancel(); } catch {}
     downloadInProgress = false;
     downloadBtn.disabled = false;
     downloadBtn.style.opacity = '';
   }
 });
 
-/* init UI */
+/* init UI and start attach */
 setPlayIcon(true);
 setMuteIcon(false, video.volume);
 volBar.style.width = (video.volume * 100) + '%';
 speedSelect.value = 1;
 
-/* start attach */
 attachSource(rawUrl);
 
 /* cleanup on unload */
